@@ -52,6 +52,11 @@
           <source>11</source>
           <target>11</target>
           <encoding>UTF-8</encoding>
+          <!-- 告诉编译器编译记录名称 -->
+          <!-- <compilerArgument>-parameters</compilerArgument> -->
+          <compilerArgs>
+            <arg>-parameters</arg>
+          </compilerArgs>
         </configuration>
       </plugin>
 
