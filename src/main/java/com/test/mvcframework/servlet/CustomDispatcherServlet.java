@@ -1,12 +1,11 @@
 package com.test.mvcframework.servlet;
 
-import com.test.mvcframework.annotations.CustomAutoWired;
-import com.test.mvcframework.annotations.CustomController;
-import com.test.mvcframework.annotations.CustomRequestMapping;
-import com.test.mvcframework.annotations.CustomService;
+import com.test.mvcframework.annotations.*;
 import com.test.mvcframework.pojo.Handler;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 
+import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
@@ -89,14 +88,27 @@ public class CustomDispatcherServlet extends HttpServlet {
                 baseUrl = annotation.value();// demo
             }
 
+            String[] baseNames = null;
+            if (aClass.isAnnotationPresent(Security.class)) {
+                Security annotation = aClass.getAnnotation(Security.class);
+                baseNames = annotation.value();
+            }
+
             // 获取方法中的注解
             Method[] declaredMethods = aClass.getDeclaredMethods();
             for (int i = 0; i < declaredMethods.length; i++) {
+
                 Method method = declaredMethods[i];
 
                 // 未标识注解，不处理
                 if (!method.isAnnotationPresent(CustomRequestMapping.class)) {
                     continue;
+                }
+
+                String[] methodNames = null;
+                if (method.isAnnotationPresent(Security.class)) {
+                    Security annotation = method.getAnnotation(Security.class);
+                    methodNames = annotation.value();
                 }
 
                 CustomRequestMapping annotation = method.getAnnotation(CustomRequestMapping.class);
@@ -119,7 +131,18 @@ public class CustomDispatcherServlet extends HttpServlet {
                     }
                 }
 
+                Set<String> names = new HashSet<>();
+                if (baseNames != null && baseNames.length > 0) {
+                    names.addAll(Arrays.asList(baseNames));
+                }
+                if (methodNames != null && methodNames.length > 0) {
+                    names.addAll(Arrays.asList(methodNames));
+                }
+
                 Handler handler = new Handler(entry.getValue(), method, Pattern.compile(url), paramIndexMapping);
+
+                handler.setSecurityNames(names);
+
                 handlerList.add(handler);
 
             }
@@ -312,9 +335,37 @@ public class CustomDispatcherServlet extends HttpServlet {
 
 
         try {
+            // 浏览器传过来的名字
+            List<String> reqNames = Arrays.asList(ArrayUtils.isEmpty(parameterMap.get("name")) ? new String[]{} : parameterMap.get("name"));
+            // 注解配置的
+            Set<String> securityNames = handler.getSecurityNames();
+
+            boolean isAllowed = false;
+            for (String reqname : reqNames) {
+                for (String secname : securityNames) {
+                    if (reqname.equals(secname)) {
+                        isAllowed = true;
+                    }
+                }
+            }
+
+            // 没有权限
+            if (!isAllowed) {
+                resp.setContentType("text/html;charset=utf-8");
+                resp.getWriter().write("<span style='color:red;'>not allowed，请检查url</span>");
+                return;
+            }
+
             Object result = method.invoke(handler.getController(), paramValues);
             System.out.println("service实现类中的name参数是：" + result);
-            resp.getWriter().write("<h1>" + result + "</h1>");
+
+            // /demo/handle01
+            String viewName = req.getRequestURI().substring(req.getRequestURI().lastIndexOf("/") + 1);// handle01
+            String path = properties.get("prefix") + viewName + properties.get("surfix");
+            System.out.println("path = " + path);
+
+            RequestDispatcher dispatcher = req.getServletContext().getRequestDispatcher(path);
+            dispatcher.forward(req, resp);
         } catch (IllegalAccessException e) {
             e.printStackTrace();
         } catch (InvocationTargetException e) {
