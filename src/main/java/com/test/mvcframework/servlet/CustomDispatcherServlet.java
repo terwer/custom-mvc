@@ -45,12 +45,12 @@ public class CustomDispatcherServlet extends HttpServlet {
 
     @Override
     public void init(ServletConfig config) throws ServletException {
-        // 1、加载配置文件 springnvc.properties
+        // 1、加载配置文件 springmvc.properties
         String contextConfigLocation = config.getInitParameter("contextConfigLocation");
         doLoadConfig(contextConfigLocation);
 
         // 2、扫描相关类，找到注解
-        doScan("com.test.demo");
+        doScan(properties.getProperty("scanPackage"));
 
         // 3、初始化bean对象（实现ioc容器）
         doInstance();
