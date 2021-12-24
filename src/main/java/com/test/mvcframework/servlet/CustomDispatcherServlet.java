@@ -4,6 +4,8 @@ import com.test.mvcframework.annotations.CustomAutoWired;
 import com.test.mvcframework.annotations.CustomController;
 import com.test.mvcframework.annotations.CustomRequestMapping;
 import com.test.mvcframework.annotations.CustomService;
+import com.test.mvcframework.pojo.Handler;
+import org.apache.commons.lang3.StringUtils;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
@@ -14,8 +16,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * @author: terwer
@@ -34,7 +40,8 @@ public class CustomDispatcherServlet extends HttpServlet {
     private Map<String, Object> ioc = new HashMap<>();
 
     // url与方法的映射关系
-    private Map<String, Method> handlerMapping = new HashMap<>();
+    // private Map<String, Method> handlerMapping = new HashMap<>();
+    private List<Handler> handlerList = new ArrayList<>();
 
     @Override
     public void init(ServletConfig config) throws ServletException {
@@ -95,10 +102,26 @@ public class CustomDispatcherServlet extends HttpServlet {
                 CustomRequestMapping annotation = method.getAnnotation(CustomRequestMapping.class);
                 String methodUrl = annotation.value(); // /query
 
-                String url = baseUrl + methodUrl;
+                String url = baseUrl + methodUrl; // /demo/query
 
                 // 建立url与method的映射关系
-                handlerMapping.put(url, method);
+                // handlerMapping.put(url, method);
+
+                // 处理参数及其顺序
+                Map<String, Integer> paramIndexMapping = new HashMap<>();
+                Parameter[] parameters = method.getParameters();
+                for (int j = 0; j < parameters.length; j++) {
+                    Parameter parameter = parameters[j];
+                    if (parameter.getType() == HttpServletRequest.class || parameter.getType() == HttpServletResponse.class) {
+                        paramIndexMapping.put(parameter.getType().getSimpleName(), j);
+                    } else {
+                        paramIndexMapping.put(parameter.getName(), j);
+                    }
+                }
+
+                Handler handler = new Handler(entry.getValue(), method, Pattern.compile(url), paramIndexMapping);
+                handlerList.add(handler);
+
             }
 
         }
@@ -243,5 +266,77 @@ public class CustomDispatcherServlet extends HttpServlet {
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
         // 处理请求
         System.out.println("收到请求");
+
+        Handler handler = getHandler(req);
+
+        if (handler == null) {
+            resp.getWriter().write("<h1>404 Not Found</h1>");
+            return;
+        }
+
+        Map<String, Integer> paramIndexMapping = handler.getParamIndexMapping();
+
+        Method method = handler.getMethod();
+
+        // 参数类型数组
+        Class<?>[] parameterTypes = method.getParameterTypes();
+
+        // 参数数组(按顺序存储进去)
+        Object[] paramValues = new Object[parameterTypes.length];
+
+        Map<String, String[]> parameterMap = req.getParameterMap();
+        for (Map.Entry param : parameterMap.entrySet()) {
+            // String value = StringUtils.join(param.getValue(), ",");
+            String value = null;
+            if (param.getValue() instanceof String[]) {
+                String[] pvalues = (String[]) param.getValue();
+                value = StringUtils.join(Arrays.asList(pvalues), ","); // aa,bb
+            } else {
+                value = param.getValue().toString();
+            }
+            if (!paramIndexMapping.containsKey(param.getKey())) {
+                continue;
+            }
+
+            // 找到参数
+            Integer idx = paramIndexMapping.get(param.getKey());
+
+            paramValues[idx] = value;
+        }
+
+        Integer reqIdx = handler.getParamIndexMapping().get(HttpServletRequest.class.getSimpleName());
+        paramValues[reqIdx] = req;
+
+        Integer respIdx = handler.getParamIndexMapping().get(HttpServletResponse.class.getSimpleName());
+        paramValues[respIdx] = resp;
+
+
+        try {
+            Object result = method.invoke(handler.getController(), paramValues);
+            System.out.println("service实现类中的name参数是：" + result);
+            resp.getWriter().write("<h1>" + result + "</h1>");
+        } catch (IllegalAccessException e) {
+            e.printStackTrace();
+        } catch (InvocationTargetException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private Handler getHandler(HttpServletRequest req) {
+        if (handlerList.size() == 0) {
+            return null;
+        }
+
+        // 根据url找打对应的方法并调用
+        String requestURI = req.getRequestURI();
+        for (Handler handler : handlerList) {
+            Matcher matcher = handler.getPattern().matcher(requestURI);
+            if (!matcher.matches()) {
+                continue;
+            }
+            return handler;
+        }
+
+        return null;
     }
 }
