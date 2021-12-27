@@ -2,6 +2,8 @@ package com.test.mvcframework.servlet;
 
 import com.test.mvcframework.annotations.*;
 import com.test.mvcframework.pojo.Handler;
+import com.test.mvcframework.pojo.HandlerExecuteChain;
+import com.test.mvcframework.pojo.HandlerInterceptor;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 
@@ -38,9 +40,13 @@ public class CustomDispatcherServlet extends HttpServlet {
     // IOC容器
     private Map<String, Object> ioc = new HashMap<>();
 
+    // 存储所有实现了HandleInterceptor接口的拦截器
+    private List<HandlerInterceptor> adaptedInterceptors = new ArrayList<>();
+
     // url与方法的映射关系
     // private Map<String, Method> handlerMapping = new HashMap<>();
-    private List<Handler> handlerList = new ArrayList<>();
+    // private List<Handler> handlerList = new ArrayList<>();
+    private List<HandlerExecuteChain> handlerChainList = new ArrayList<>();
 
     @Override
     public void init(ServletConfig config) throws ServletException {
@@ -77,6 +83,14 @@ public class CustomDispatcherServlet extends HttpServlet {
         for (Map.Entry<String, Object> entry : ioc.entrySet()) {
             // 获取IOC容器中当前对象的class类型
             Class<?> aClass = entry.getValue().getClass();
+
+            // 找到所有的拦截器
+            // 加上key的判断是因为容器中有两个类型相同的实例，取一个即可，防止后面拦截器重复触发
+            if (entry.getKey().equals(HandlerInterceptor.class.getName())
+                    && HandlerInterceptor.class.isAssignableFrom(aClass)) {
+                HandlerInterceptor interceptor = (HandlerInterceptor) entry.getValue();
+                adaptedInterceptors.add(interceptor);
+            }
 
             if (!aClass.isAnnotationPresent(CustomController.class)) {
                 continue;
@@ -140,13 +154,19 @@ public class CustomDispatcherServlet extends HttpServlet {
                 }
 
                 Handler handler = new Handler(entry.getValue(), method, Pattern.compile(url), paramIndexMapping);
-
                 handler.setSecurityNames(names);
 
-                handlerList.add(handler);
-
+                HandlerExecuteChain chain = new HandlerExecuteChain();
+                chain.setHandler(handler);
+                handlerChainList.add(chain);
             }
 
+        }
+
+        if (null == this.adaptedInterceptors || this.adaptedInterceptors.size() == 0) {
+            System.out.println("未找到拦截器");
+        } else {
+            System.out.println("找到" + this.adaptedInterceptors.size() + "个拦截器");
         }
     }
 
@@ -225,6 +245,24 @@ public class CustomDispatcherServlet extends HttpServlet {
                         ioc.put(inrerface.getName(), aClass.newInstance());
                     }
 
+                } else if (aClass.isAnnotationPresent(CustomComponent.class)) {
+                    CustomComponent annotation = aClass.getAnnotation(CustomComponent.class);
+                    String beanName = annotation.value();
+
+                    if (!"".equals(beanName.trim())) {
+                        ioc.put(beanName, aClass.newInstance());
+                    } else {
+                        beanName = lowerFirst(aClass.getSimpleName());// demoHandlerInterceptor
+                        ioc.put(beanName, aClass.newInstance());
+                    }
+
+                    // 如果component实现了接口，需要放一份接口，用于注接口入
+                    Class<?>[] interfaces = aClass.getInterfaces();
+                    for (int j = 0; j < interfaces.length; j++) {
+                        Class<?> inrerface = interfaces[j];
+
+                        ioc.put(inrerface.getName(), aClass.newInstance());
+                    }
 
                 }
             }
@@ -290,10 +328,17 @@ public class CustomDispatcherServlet extends HttpServlet {
         // 处理请求
         System.out.println("收到请求");
 
-        Handler handler = getHandler(req);
+        HandlerExecuteChain handlerChain = getHandlerChain(req);
 
-        if (handler == null) {
+        if (handlerChain == null) {
             resp.getWriter().write("<h1>404 Not Found</h1>");
+            return;
+        }
+
+        Handler handler = handlerChain.getHandler();
+
+        // 前置拦截
+        if (!handlerChain.applyPreHandle(req, resp, handler)) {
             return;
         }
 
@@ -333,31 +378,13 @@ public class CustomDispatcherServlet extends HttpServlet {
         Integer respIdx = handler.getParamIndexMapping().get(HttpServletResponse.class.getSimpleName());
         paramValues[respIdx] = resp;
 
-
         try {
-            // 浏览器传过来的名字
-            List<String> reqNames = Arrays.asList(ArrayUtils.isEmpty(parameterMap.get("name")) ? new String[]{} : parameterMap.get("name"));
-            // 注解配置的
-            Set<String> securityNames = handler.getSecurityNames();
-
-            boolean isAllowed = false;
-            for (String reqname : reqNames) {
-                for (String secname : securityNames) {
-                    if (reqname.equals(secname)) {
-                        isAllowed = true;
-                    }
-                }
-            }
-
-            // 没有权限
-            if (!isAllowed) {
-                resp.setContentType("text/html;charset=utf-8");
-                resp.getWriter().write("<span style='color:red;'>not allowed，请检查url</span>");
-                return;
-            }
-
+            // 核心处理方法
             Object result = method.invoke(handler.getController(), paramValues);
             System.out.println("service实现类中的name参数是：" + result);
+
+            // 后置拦截
+            handlerChain.applyPostHandle(req, resp, handler);
 
             // /demo/handle01
             String viewName = req.getRequestURI().substring(req.getRequestURI().lastIndexOf("/") + 1);// handle01
@@ -366,26 +393,35 @@ public class CustomDispatcherServlet extends HttpServlet {
 
             RequestDispatcher dispatcher = req.getServletContext().getRequestDispatcher(path);
             dispatcher.forward(req, resp);
-        } catch (IllegalAccessException e) {
-            e.printStackTrace();
-        } catch (InvocationTargetException e) {
+        } catch (Exception e) {
+            // 完成拦截
+            handlerChain.trigerCompletion(req, resp, e);
+
             e.printStackTrace();
         }
     }
 
-    private Handler getHandler(HttpServletRequest req) {
-        if (handlerList.size() == 0) {
+    private HandlerExecuteChain getHandlerChain(HttpServletRequest req) {
+        if (handlerChainList.size() == 0) {
             return null;
         }
 
         // 根据url找打对应的方法并调用
         String requestURI = req.getRequestURI();
-        for (Handler handler : handlerList) {
+        for (HandlerExecuteChain chain : handlerChainList) {
+            Handler handler = chain.getHandler();
+
             Matcher matcher = handler.getPattern().matcher(requestURI);
             if (!matcher.matches()) {
                 continue;
             }
-            return handler;
+
+            // 注入拦截器
+            for (HandlerInterceptor interceptor : adaptedInterceptors) {
+                chain.addIntercetor(interceptor);
+            }
+
+            return chain;
         }
 
         return null;
